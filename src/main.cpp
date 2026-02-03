@@ -4,6 +4,7 @@
 #include "commands/add.h"
 #include "commands/status.h"
 #include "commands/ls-files.h"
+#include "commands/cat-file.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -32,6 +33,14 @@ int main(int argc, char* argv[]) {
     else if (command == "ls-files") {
         LsFiles lsFiles;
         return lsFiles.execute() ? 0 : 1;
+    }
+    else if (command == "cat-file") {
+        if (argc < 4) {
+            std::cerr << "Usage: mygit cat-file (-p|-s|-t) <object>\n";
+            return 1;
+        }
+        CatFile catFile;
+        return catFile.execute(argv[2], argv[3]) ? 0 : 1;
     }
     
     std::cerr << "Unknown command: " << command << "\n";
