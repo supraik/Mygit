@@ -9,6 +9,7 @@
 namespace fs = std::filesystem;
 
 bool Add::execute(const std::string& filePath) {
+    
     // Find repository root
     std::string repoPath;
     if (!findRepoRoot(repoPath)) {

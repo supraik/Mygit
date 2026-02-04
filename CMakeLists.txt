@@ -8,6 +8,7 @@ add_executable(mygit
     src/main.cpp 
     src/commands/init.cpp
     src/commands/add.cpp
+    src/commands/rm.cpp
     src/utils/hash.cpp
 )
 

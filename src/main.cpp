@@ -5,6 +5,7 @@
 #include "commands/status.h"
 #include "commands/ls-files.h"
 #include "commands/cat-file.h"
+#include "commands/rm.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -41,6 +42,14 @@ int main(int argc, char* argv[]) {
         }
         CatFile catFile;
         return catFile.execute(argv[2], argv[3]) ? 0 : 1;
+    }
+    else if (command == "rm") {
+        if (argc < 3) {
+            std::cerr << "Usage: mygit rm <file>\n";
+            return 1;
+        }
+        Rm rm;
+        return rm.execute(argv[2]) ? 0 : 1;
     }
     
     std::cerr << "Unknown command: " << command << "\n";
