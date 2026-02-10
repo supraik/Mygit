@@ -6,6 +6,7 @@
 #include "commands/ls-files.h"
 #include "commands/cat-file.h"
 #include "commands/rm.h"
+#include "commands/commit.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -50,6 +51,14 @@ int main(int argc, char* argv[]) {
         }
         Rm rm;
         return rm.execute(argv[2]) ? 0 : 1;
+    }
+    else if (command == "commit") {
+        if (argc < 4 || std::string(argv[2]) != "-m") {
+            std::cerr << "Usage: mygit commit -m <message>\n";
+            return 1;
+        }
+        Commit commit;
+        return commit.execute(argv[3]) ? 0 : 1;
     }
     
     std::cerr << "Unknown command: " << command << "\n";

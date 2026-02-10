@@ -94,3 +94,16 @@ bool Rm::findRepoRoot(std::string& repoPath) {
         current = current.parent_path();
     }
 }
+
+
+bool Rm::remove(const std::string& repoPath, const std::string& filePath)
+{
+    try {
+        fs::remove(filePath);
+    } catch (const std::exception& e) {
+        std::cerr << "error: failed to delete file '" << filePath << "': " << e.what() << "\n";
+        return false;
+    }
+    
+    return true;
+}
