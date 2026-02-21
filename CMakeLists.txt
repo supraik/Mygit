@@ -11,6 +11,7 @@ add_executable(mygit
     src/commands/rm.cpp
     src/commands/commit.cpp
     src/commands/log.cpp
+    src/commands/checkout.cpp
     src/commands/status.cpp
     src/commands/ls-files.cpp
     src/commands/cat-file.cpp

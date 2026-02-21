@@ -8,6 +8,7 @@
 #include "commands/rm.h"
 #include "commands/commit.h"
 #include "commands/log.h"
+#include "commands/checkout.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -64,6 +65,14 @@ int main(int argc, char* argv[]) {
     else if (command == "log") {
         Log log;
         return log.execute() ? 0 : 1;
+    }
+    else if (command == "checkout") {
+        if (argc < 3) {
+            std::cerr << "Usage: mygit checkout <branch|commit>\n";
+            return 1;
+        }
+        Checkout checkout;
+        return checkout.execute(argv[2]) ? 0 : 1;
     }
     
     std::cerr << "Unknown command: " << command << "\n";
