@@ -7,6 +7,7 @@
 #include "commands/cat-file.h"
 #include "commands/rm.h"
 #include "commands/commit.h"
+#include "commands/log.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -59,6 +60,10 @@ int main(int argc, char* argv[]) {
         }
         Commit commit;
         return commit.execute(argv[3]) ? 0 : 1;
+    }
+    else if (command == "log") {
+        Log log;
+        return log.execute() ? 0 : 1;
     }
     
     std::cerr << "Unknown command: " << command << "\n";

@@ -10,10 +10,15 @@ add_executable(mygit
     src/commands/add.cpp
     src/commands/rm.cpp
     src/commands/commit.cpp
+    src/commands/log.cpp
+    src/commands/status.cpp
+    src/commands/ls-files.cpp
+    src/commands/cat-file.cpp
     src/utils/hash.cpp
 )
 
 target_include_directories(mygit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 
 # Link Windows Crypto API
 target_link_libraries(mygit PRIVATE crypt32)
