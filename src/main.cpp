@@ -9,6 +9,7 @@
 #include "commands/commit.h"
 #include "commands/log.h"
 #include "commands/checkout.h"
+#include "commands/branch.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -74,7 +75,20 @@ int main(int argc, char* argv[]) {
         Checkout checkout;
         return checkout.execute(argv[2]) ? 0 : 1;
     }
-    
+    else if (command == "branch") {
+        if (argc < 3) {
+            std::cerr << "Usage: mygit branch [-d] <branch-name>\n";
+            return 1;
+        }
+        Branch branch;
+        if (argc == 4 && std::string(argv[2]) == "-d") {
+            // Delete branch: mygit branch -d <branch-name>
+            return branch.execute(argv[3], "-d") ? 0 : 1;
+        } else {
+            // Create branch: mygit branch <branch-name>
+            return branch.execute(argv[2]) ? 0 : 1;
+        }
+    }
     std::cerr << "Unknown command: " << command << "\n";
     return 1;
 }

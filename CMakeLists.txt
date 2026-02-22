@@ -15,7 +15,9 @@ add_executable(mygit
     src/commands/status.cpp
     src/commands/ls-files.cpp
     src/commands/cat-file.cpp
+    src/commands/branch.cpp
     src/utils/hash.cpp
+    
 )
 
 target_include_directories(mygit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
