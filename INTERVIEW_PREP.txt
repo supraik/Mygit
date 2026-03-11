@@ -1,0 +1,741 @@
+================================================================================
+                    MYGIT - ULTIMATE INTERVIEW PREPARATION GUIDE
+================================================================================
+Date: March 2026
+Project: MyGit - A custom Git Version Control System built from scratch
+
+================================================================================
+                              PROJECT OVERVIEW
+================================================================================
+
+WHAT IS MYGIT?
+--------------
+MyGit is a fully functional version control system (VCS) built from scratch,
+closely mirroring the internals of Git. It consists of two components:
+
+  1. C++ CLIENT (mygit executable)
+     - Implements all core Git operations from the ground up
+     - Built with C++17 and CMake build system
+     - Uses Windows CryptoAPI (crypt32) for SHA1 hashing
+     - Uses Windows Sockets (winsock2/ws2_32) for HTTP networking
+     - Stores version-controlled data in a .mygit/ directory
+
+  2. GO HTTP SERVER (mygit-server)
+     - A REST API server that acts as a remote repository
+     - Written in Go using only the standard library (no external dependencies)
+     - Handles object storage and branch reference management
+     - Containerized with Docker for deployment
+     - Configurable via environment variables (PORT)
+
+SUPPORTED COMMANDS:
+-------------------
+  mygit init                    - Initialize a new repository
+  mygit add <file>              - Stage a file for commit
+  mygit rm <file>               - Remove a file from the index
+  mygit status                  - Show working tree status
+  mygit ls-files                - List all staged files
+  mygit cat-file (-p|-s|-t) <hash>  - Inspect a git object
+  mygit commit -m <message>     - Create a commit snapshot
+  mygit log                     - Show commit history
+  mygit branch <name>           - Create a new branch
+  mygit branch -d <name>        - Delete a branch
+  mygit checkout <branch|hash>  - Switch branches or restore a commit
+  mygit merge <branch>          - Merge a branch (fast-forward + three-way)
+  mygit remote add <name> <url> - Register a remote server
+  mygit push <remote> [branch]  - Push objects and refs to remote
+  mygit pull <remote> [branch]  - Fetch and update from remote
+
+INTERNAL DATA STRUCTURES (.mygit/ layout):
+-------------------------------------------
+  .mygit/
+  ├── HEAD              - Points to current branch (or detached commit hash)
+  ├── config            - Repository config (core settings, remote URLs)
+  ├── index             - Staging area (maps filepath -> SHA1 hash)
+  ├── objects/          - Content-addressable object store
+  │   └── ab/           - First 2 chars of hash = directory
+  │       └── cdef...   - Remaining 38 chars = filename
+  └── refs/
+      └── heads/        - One file per branch (content = commit hash)
+          ├── master
+          └── feature-x
+
+OBJECT TYPES:
+-------------
+  BLOB    - Raw file content: "blob <size>\0<content>"
+  TREE    - Directory listing: "tree <size>\0100644 blob <hash>\t<filename>\n..."
+  COMMIT  - Snapshot: "commit <size>\0tree <hash>\nparent <hash>\nauthor ...\n\n<msg>"
+
+All objects are identified by their SHA1 hash (40-char hex string).
+
+================================================================================
+            SECTION 1: CORE COMPUTER SCIENCE / DATA STRUCTURES
+================================================================================
+
+Q: What data structure is used for the object store?
+-----------------------------------------------------
+A: A content-addressable hash map (key-value store on disk). Objects are stored
+   in the filesystem under .mygit/objects/<first2chars>/<remaining38chars>.
+   The key IS the SHA1 hash of the content - you can never look up an object
+   without knowing its hash. This is identical to how Git works internally.
+   
+   Benefits:
+   - Deduplication: identical content always has the same hash, so it's stored
+     only once regardless of how many commits reference it
+   - Integrity: SHA1 of content = filename, so any corruption is immediately
+     detectable
+   - Immutability: once written, an object never changes (its hash would change)
+
+Q: How is the staging area (index) implemented?
+-----------------------------------------------
+A: As a flat text file (.mygit/index) with one entry per staged file:
+   Format: "<mode> <hash> <filepath>\n"
+   Example: "100644 a3f5b2... src/main.cpp\n"
+   
+   In memory it is represented as: std::map<std::string, std::string>
+   mapping filepath -> hash. The mode is always 100644 (regular file) in this
+   implementation. The map is read, modified, then written back atomically.
+
+Q: How does branch storage work?
+---------------------------------
+A: Each branch is a single text file in .mygit/refs/heads/<branchname> whose
+   contents are just the 40-character SHA1 hash of the latest commit.
+   To create a branch you just write a file; to delete, remove the file.
+   HEAD is a symbolic reference: either "ref: refs/heads/<branch>" for a named
+   branch or a raw 40-char hash for detached HEAD state.
+
+Q: What is a Merkle DAG and how does this project use one?
+-----------------------------------------------------------
+A: A Merkle DAG (Directed Acyclic Graph) is a graph where each node is
+   identified by the cryptographic hash of its contents, including the hashes
+   of its children. Git's commit history IS a Merkle DAG:
+   
+   - Each commit references a tree object (current snapshot) by hash
+   - Each commit references zero or more parent commits by hash
+   - You cannot fake history without recomputing all descendant hashes
+   
+   In MyGit, getAllReferencedObjects() in push.cpp traverses this DAG using
+   BFS (queue + visited set) to collect every object reachable from a commit.
+
+Q: Explain the BFS used in push/pull object traversal.
+-------------------------------------------------------
+A: When pushing, we need to transfer all objects (commits, trees, blobs) that
+   the remote doesn't have. We do a BFS starting from the branch's tip commit:
+   
+   - Start: push commit hash into queue, add to visited set
+   - Process each commit: extract tree hash and parent hashes, enqueue unseen ones
+   - Process each tree: extract blob hashes and nested tree hashes
+   - Collect all hashes in a vector, then upload each one
+   
+   Data: std::set<std::string> visited (O(1) lookup), std::queue<std::string>
+
+Q: What hash function is used and why SHA1?
+-------------------------------------------
+A: SHA1 is used, implemented via Windows CryptoAPI (CryptAcquireContext,
+   CryptCreateHash with CALG_SHA1, CryptHashData, CryptGetHashParam).
+   
+   Why SHA1 (as Git uses it historically):
+   - Produces a 160-bit (20-byte / 40 hex char) digest
+   - Fast computation
+   - Collision probability negligible for practical VCS use
+   - Git standardized on it; clients and servers must agree
+   
+   Note: Git is actively migrating to SHA-256 (sha256 object format) due to
+   theoretical SHA1 collision attacks (SHAttered attack, 2017), but SHA1 remains
+   the default for compatibility.
+
+Q: How does three-way merge work?
+----------------------------------
+A: Three-way merge requires three commits:
+   1. Current branch tip (HEAD)
+   2. Target branch tip (the branch being merged)
+   3. Merge base (LCA - lowest common ancestor of both branches)
+   
+   Algorithm in merge.cpp:
+   a) Find merge base using BFS on both commit graphs (findMergeBase)
+   b) Check fast-forward: if merge base == current, just advance HEAD pointer
+   c) Otherwise, get file snapshots for all three commits
+   d) For each file:
+      - Unchanged on both sides: keep as-is
+      - Changed on one side only: take the changed version
+      - Changed on both sides: CONFLICT - mark with conflict markers
+   
+   The merge base is found by collecting ancestor sets for both commits
+   (BFS traversal) and finding the intersection.
+
+Q: How is the commit graph traversed for 'git log'?
+-----------------------------------------------------
+A: Starting from HEAD (or the current branch tip), log.cpp follows the "parent"
+   field in each commit object backwards until reaching a commit with no parent
+   (the initial commit). This is a simple linked-list traversal through the DAG.
+
+================================================================================
+            SECTION 2: SYSTEMS PROGRAMMING / C++
+================================================================================
+
+Q: Why C++17 specifically?
+---------------------------
+A: C++17 is required for std::filesystem (used heavily throughout the project
+   for directory creation, path manipulation, and file existence checks).
+   std::filesystem eliminates the need for OS-specific file APIs and provides
+   cross-platform path handling. Without it, you'd need POSIX dirent.h or
+   Windows FindFirstFile/FindNextFile separately.
+
+Q: How are git objects stored on disk?
+----------------------------------------
+A: Using the git blob format:
+   - Header: "<type> <content_size_in_bytes>\0"
+   - Followed immediately by the raw content bytes
+   
+   Example for a file containing "hello":
+     Header: "blob 5\0"
+     Content: "hello"
+     SHA1 of ("blob 5\0hello") = the object's hash / filename
+   
+   In C++ this is: std::string header = "blob " + std::to_string(size) + '\0';
+   The null byte \0 is a single byte (not two chars), embedded in a std::string.
+   Written with std::ofstream in binary mode (std::ios::binary).
+
+Q: Why use std::map for the index instead of std::unordered_map?
+-----------------------------------------------------------------
+A: std::map maintains sorted order (alphabetical by filepath). This makes the
+   tree object deterministic - the same set of files always produces the same
+   tree hash regardless of insertion order. With unordered_map the iteration
+   order is implementation-defined, which would cause different SHA1 hashes
+   for identical file sets, breaking content-addressability.
+
+Q: How does findRepoRoot() work?
+---------------------------------
+A: It walks UP the filesystem hierarchy from the current working directory,
+   checking if a .mygit directory exists at each level. This is exactly how
+   real git works - you can run git commands from any subdirectory of a repo.
+   
+   fs::path current = fs::current_path();
+   while (true) {
+       if (fs::exists(current / ".mygit")) { return current/.mygit; }
+       if (current == current.parent_path()) { return false; } // at root
+       current = current.parent_path();
+   }
+
+Q: How is HTTP communication implemented in push/pull?
+-------------------------------------------------------
+A: Using raw Windows Sockets (Winsock2 API) - winsock2.h and ws2tcpip.h.
+   The push/pull commands parse the remote URL (from .mygit/config), resolve
+   the host via getaddrinfo(), open a TCP socket with connect(), then send
+   hand-crafted HTTP/1.1 requests (GET and POST) formatted as raw strings.
+   
+   This avoids any external HTTP library dependency, demonstrating knowledge
+   of the HTTP protocol at the socket level. The response is parsed by looking
+   for the HTTP status line and body separator (\r\n\r\n).
+
+Q: What is RAII and how is it used here?
+-----------------------------------------
+A: RAII (Resource Acquisition Is Initialization) means resources are tied to
+   object lifetimes. In this project:
+   - std::ifstream / std::ofstream automatically close file handles on
+     destruction (no need to call close() explicitly)
+   - std::filesystem::path objects manage string paths safely
+   - std::vector<char> manages heap memory for file content
+   
+   The Winsock handle (HCRYPTPROV, HCRYPTHASH) is explicitly cleaned up with
+   CryptReleaseContext / CryptDestroyHash in the hash utilities.
+
+Q: How are merge conflicts represented?
+-----------------------------------------
+A: When both sides modified the same line differently, the file is written with
+   conflict markers identical to Git's format:
+   
+   <<<<<<< HEAD
+   (current branch change)
+   =======
+   (incoming branch change)
+   >>>>>>> feature-branch
+   
+   The merge is marked as conflicted; the user must resolve and re-commit.
+
+Q: What is a "detached HEAD" state?
+-------------------------------------
+A: Normally HEAD contains "ref: refs/heads/<branchname>" (symbolic reference).
+   Detached HEAD occurs when HEAD contains a raw commit hash instead of a branch
+   reference - this happens when checking out a specific commit directly
+   (mygit checkout <hash>). In this state, new commits are not attached to any
+   branch and can become unreachable. Branch operations (merge) are disabled.
+
+Q: Explain the config file format used.
+-----------------------------------------
+A: An INI-like format (same as Git's):
+   
+   [core]
+       repositoryformatversion = 0
+   [remote "origin"]
+       url = http://localhost:8080
+   
+   Sections are in [brackets], subsections use "quotes". Key-value pairs are
+   parsed by splitting on '=' and trimming whitespace. push.cpp and pull.cpp
+   contain the parser - scan for "[remote "<name>"]" section then read "url".
+
+================================================================================
+            SECTION 3: GO AND THE SERVER
+================================================================================
+
+Q: Why Go for the server?
+---------------------------
+A: Go is ideal for network servers because:
+   - Built-in concurrency with goroutines (lightweight threads, ~2KB stack)
+   - net/http package in standard library - no external web framework needed
+   - Fast compilation, single binary output (easy to containerize)
+   - Excellent performance for I/O-bound workloads
+   - Simple error handling pattern (multiple return values)
+   - Cross-platform compilation: GOOS=linux GOARCH=amd64 go build
+
+Q: How does the Go HTTP server handle concurrency?
+----------------------------------------------------
+A: Go's net/http.ListenAndServe automatically handles each request in a new
+   goroutine. The server is inherently concurrent without any manual thread
+   management. Each HTTP handler function runs concurrently - for this project
+   each handler just does file I/O (read/write objects and refs), which is
+   safe because:
+   - Object writes are idempotent (same hash = same content)
+   - Ref updates use os.WriteFile which is atomic on most filesystems
+
+Q: What REST API endpoints does the server expose?
+----------------------------------------------------
+A: GET  /health           - Returns "OK" (liveness check)
+   GET  /refs             - Returns all branch refs as "hash refname\n" lines
+   GET  /ref/{name}       - Returns the commit hash for branch {name}
+   POST /ref/{name}       - Body: new hash; updates branch pointer
+   GET  /object/{hash}    - Downloads a git object (blob/tree/commit)
+   POST /object/{hash}    - Body: raw bytes; stores a git object
+
+Q: How does the server store objects?
+---------------------------------------
+A: Identically to the C++ client: .mygit/objects/<dir>/<file> where dir is
+   hash[0:2] and file is hash[2:]. The Go functions readObject(hash) and
+   writeObject(hash, content) implement this. This means the server's
+   .mygit directory is a valid git-compatible object store.
+
+Q: Explain Go's error handling philosophy.
+-------------------------------------------
+A: Go does not have exceptions. Errors are explicit return values:
+   
+   content, err := os.ReadFile(path)
+   if err != nil {
+       return nil, err    // propagate up
+   }
+   
+   This forces callers to handle every error at the call site. It makes
+   error paths visible in code, unlike try/catch where exceptions can
+   propagate invisibly. Trade-off: more verbose, but more predictable.
+
+Q: What is a Go interface and how is http.ResponseWriter one?
+--------------------------------------------------------------
+A: An interface defines a set of methods. Any type implementing those methods
+   satisfies the interface (implicit / structural typing, no "implements" keyword).
+   http.ResponseWriter is an interface with methods: Header(), Write(), WriteHeader().
+   The concrete type injected by net/http also buffers responses and sets headers.
+   This allows writing to w like any io.Writer, enabling json.NewEncoder(w).Encode().
+
+Q: How is the PORT configured at runtime?
+------------------------------------------
+A: Via environment variable: if PORT is set (os.Getenv("PORT") != ""), the server
+   listens on that port. Otherwise defaults to :8080. This follows the 12-Factor
+   App methodology - configuration comes from the environment, not hardcoded.
+   Cloud platforms like Railway, Heroku, and Render inject a PORT env var.
+
+Q: What does the Dockerfile do?
+---------------------------------
+A: Multi-stage or single-stage build that:
+   1. Copies go.mod and source code (main.go)
+   2. Runs go build to compile to a single static binary
+   3. Exposes the configured port
+   4. Sets the entrypoint to the binary
+   This produces a minimal container image for cloud deployment.
+
+================================================================================
+            SECTION 4: GIT INTERNALS / VERSION CONTROL THEORY
+================================================================================
+
+Q: What is content-addressable storage?
+-----------------------------------------
+A: A storage model where the ADDRESS of content is derived FROM the content
+   itself (its hash). Benefits:
+   - Deduplication: store a file once no matter how many commits reference it
+   - Integrity: if content changes, the hash changes - corruption is detected
+   - Efficient snapshots: commits store trees of hashes, not file copies
+   
+   In MyGit: every blob, tree, and commit is named by its SHA1(content).
+
+Q: What is the difference between a fast-forward and a three-way merge?
+------------------------------------------------------------------------
+A: Fast-forward merge: The merge base is the CURRENT branch tip. This means
+   the current branch has no new commits since branching. We just advance the
+   current branch pointer to the target commit. No merge commit needed.
+   
+       A---B---C (main)
+                \
+                 D---E (feature) <-- fast-forward: main becomes E
+   
+   Three-way merge: Both branches have diverged from the merge base. A new
+   merge commit is created with two parents.
+   
+       A---B---C (main)
+        \
+         D---E (feature) <-- requires comparing B, C, E (with A as base)
+
+Q: Why is the merge base (LCA) needed for merging?
+----------------------------------------------------
+A: Without a common ancestor, you cannot determine which changes are "new".
+   The merge base tells us: "what did the file look like before either branch
+   touched it?" If branch A changed a function and branch B didn't, we keep A's
+   change. Without the base, we couldn't distinguish "A changed it" from "B
+   deleted it unexpectedly."
+
+Q: What is HEAD and what are its states?
+-----------------------------------------
+A: HEAD is a file (.mygit/HEAD) that tells the repository "where you are":
+   
+   Attached HEAD: "ref: refs/heads/master\n"
+     - You're on a branch; new commits advance that branch
+   
+   Detached HEAD: "abc123def456...\n" (raw 40-char hash)
+     - You're viewing a historical commit; new commits are not on any branch
+     - Dangerous: commits can become unreachable (garbage collected in real git)
+
+Q: Explain the tree object structure.
+---------------------------------------
+A: A tree represents a directory snapshot at a point in time.
+   Format: "tree <size>\0<entries>"
+   Each entry: "100644 blob <hash>\t<filename>\n"
+   
+   File mode meanings:
+   100644 = regular file
+   100755 = executable
+   040000 = directory (subtree)
+   120000 = symlink
+   
+   MyGit only implements 100644 (regular files, the most common case).
+   Trees are deterministically sorted by filename (std::map ensures this).
+
+Q: What is a pack file and does MyGit implement it?
+----------------------------------------------------
+A: Pack files are Git's optimization for storing many objects compressed
+   together with delta compression (storing diffs between similar objects instead
+   of full content). MyGit does NOT implement pack files - it stores every
+   object as a loose file. For small repositories this is fine; for large repos
+   with many files/versions, loose objects are inefficient (many small files,
+   no delta compression). Real Git runs 'git gc' to consolidate loose objects
+   into pack files periodically.
+
+Q: What is the difference between git fetch and git pull?
+----------------------------------------------------------
+A: git fetch downloads objects and updates remote tracking refs (origin/main)
+   but does NOT modify your local working tree or branch.
+   
+   git pull = git fetch + git merge (or rebase).
+   
+   MyGit's pull command currently does a simplified pull: fetches missing objects
+   and updates the local branch ref to match the remote. It does not perform
+   a working tree merge if local commits exist.
+
+================================================================================
+            SECTION 5: NETWORKING / HTTP PROTOCOL
+================================================================================
+
+Q: How does push communicate with the server?
+----------------------------------------------
+A: 1. Parse remote URL from .mygit/config (string parsing of INI format)
+   2. Resolve hostname via getaddrinfo() (DNS lookup)
+   3. Create TCP socket: socket(AF_INET, SOCK_STREAM, 0)
+   4. Connect: connect(sock, addr, addrlen)
+   5. For each object: send HTTP POST /object/<hash> with binary body
+   6. After objects: send HTTP POST /ref/<branch> with commit hash as body
+   7. Close socket after each request (HTTP/1.0 style, no keep-alive)
+
+Q: Why POST /object/{hash} instead of PUT?
+-------------------------------------------
+A: Technically PUT would be more RESTful (PUT = create/replace a resource at
+   a known URL, idempotent). POST is used here for simplicity - the behavior
+   IS idempotent (writing the same object twice is a no-op since hash = content).
+   In a production system, PUT with proper 201 Created / 200 OK responses
+   would be the correct HTTP verb.
+
+Q: How does the server handle cross-origin requests (CORS)?
+------------------------------------------------------------
+A: The current implementation does NOT handle CORS. Since the client is a
+   command-line C++ program (not a browser), CORS is irrelevant. If a web
+   frontend were added, Access-Control-Allow-Origin headers would be needed.
+
+Q: What format does /refs return?
+-----------------------------------
+A: Plain text, one line per branch:
+   "<commit_hash> refs/heads/<branchname>\n"
+   Example:
+   "abc123... refs/heads/master\n"
+   "def456... refs/heads/feature\n"
+   
+   This is similar to the git-upload-pack protocol's ref advertisement format.
+
+================================================================================
+            SECTION 6: BUILD SYSTEM / TOOLING
+================================================================================
+
+Q: How is the project built?
+------------------------------
+A: CMake (version 3.10+) is used as the meta-build system:
+   - CMakeLists.txt defines the mygit executable target
+   - Lists all .cpp source files explicitly
+   - Sets C++17 standard
+   - Links against crypt32 (Windows crypto) and ws2_32 (Winsock)
+   - Out-of-source build: build files go to build/ directory
+   
+   Commands:
+     cmake -B build           # Configure (generate VS project / Makefiles)
+     cmake --build build      # Compile
+     build/Debug/mygit.exe    # Run
+
+Q: Why link crypt32 and ws2_32?
+---------------------------------
+A: crypt32.dll - Windows Cryptography API: provides CryptAcquireContext,
+   CryptCreateHash, CryptHashData, CryptGetHashParam for SHA1 computation.
+   
+   ws2_32.dll - Windows Sockets 2: provides socket(), connect(), send(),
+   recv(), getaddrinfo() for TCP network communication in push/pull.
+   
+   Without these linker flags, the build would fail with "unresolved external
+   symbol" errors for the crypto and socket functions.
+
+Q: What is an out-of-source build and why use it?
+---------------------------------------------------
+A: All CMake-generated files (Makefiles, .vcxproj, object files, executables)
+   go into a separate build/ directory, keeping the source tree clean.
+   Benefits:
+   - Source control: easily gitignore the entire build/ directory
+   - Multiple configurations: build-debug/, build-release/ simultaneously
+   - Clean build: just delete build/ without touching source files
+
+Q: How is the Go server built?
+--------------------------------
+A: Standard Go build toolchain:
+   - go build ./... or go build main.go
+   - Uses go.mod for module definition (module name + Go version)
+   - Single binary output, statically linked (with CGO_ENABLED=0)
+   - Docker builds it inside the container for isolation
+
+================================================================================
+            SECTION 7: SOFTWARE DESIGN PATTERNS
+================================================================================
+
+Q: What design pattern do the command classes follow?
+------------------------------------------------------
+A: Command Pattern. Each command (Add, Commit, Push, etc.) is encapsulated in
+   its own class with an execute() method. main.cpp dispatches to the correct
+   command class based on argv[1]. Benefits:
+   - Each command is independently testable
+   - Adding new commands doesn't modify existing code (Open/Closed Principle)
+   - Command objects can be extended (e.g., undo, queuing - though not implemented)
+
+Q: Is there any violation of DRY (Don't Repeat Yourself)?
+----------------------------------------------------------
+A: Yes - findRepoRoot() is duplicated in every command class (Add, Commit,
+   Merge, Checkout, Branch, etc.). This should ideally be extracted into a
+   shared utility class or base class. The same applies to parsing the config
+   file for remote URLs in both push.cpp and pull.cpp.
+   
+   Potential refactor: create a Repository class with static methods for
+   findRepoRoot(), readConfig(), getCurrentBranch(), etc.
+
+Q: How is dependency injection used in the Go server?
+-----------------------------------------------------
+A: It isn't - the server uses package-level constants (repoPath, objectsDir,
+   refsDir) directly. A more testable design would inject a storage interface,
+   allowing mock implementations in tests. The current design is straightforward
+   for a learning project but would need refactoring for production.
+
+Q: What's the single responsibility of each Go handler?
+--------------------------------------------------------
+A: - handleHealth: returns "OK" (health check for load balancers)
+   - handleListRefs: lists all branches with their commit hashes
+   - handleRef: GET retrieves a branch hash, POST updates a branch hash
+   - handleObject: GET retrieves an object, POST stores an object
+   
+   Each handler deals with ONE resource type. The URL structure follows REST
+   principles (/refs = collection, /ref/{name} = single resource).
+
+================================================================================
+            SECTION 8: POTENTIAL IMPROVEMENTS & TRADE-OFFS
+================================================================================
+
+Q: What are the known limitations of this implementation?
+---------------------------------------------------------
+A: 1. No zlib compression: Real Git compresses objects with zlib/deflate.
+      MyGit stores raw uncompressed bytes, using more disk space.
+   
+   2. No pack files: Each object is a separate file. Large repos with many
+      files/versions create thousands of small files (inode exhaustion risk).
+   
+   3. Partial pull (no working tree update): pull updates the branch ref but
+      doesn't update the working directory files if there are local commits.
+   
+   4. No authentication/authorization on the server: anyone who can reach
+      port 8080 can push or pull any branch.
+   
+   5. SHA1 only: Not planning to support SHA-256 like modern Git.
+   
+   6. Windows-only crypto: Uses Windows CryptoAPI. Would need OpenSSL or
+      a portable SHA1 impl for Linux/macOS.
+   
+   7. No atomic ref updates: If the server crashes mid-push, refs and objects
+      could be in an inconsistent state.
+   
+   8. No ignore file (.mygitignore): No way to exclude files from tracking.
+   
+   9. status command doesn't compare against last commit: Only shows staged
+      files, not unstaged changes or untracked files relative to HEAD.
+
+Q: How would you add authentication to the server?
+---------------------------------------------------
+A: Options:
+   1. HTTP Basic Auth: client sends Authorization: Basic base64(user:pass) header
+   2. Bearer token: client sends Authorization: Bearer <jwt-token>
+   3. SSH keys: like real Git - generate key pair, register public key on server
+   
+   Implementation: middleware function that wraps each handler, checks the
+   Authorization header, returns 401 Unauthorized if missing/invalid.
+
+Q: How would you scale this to handle many concurrent pushes?
+--------------------------------------------------------------
+A: The Go server already handles concurrency via goroutines. For correctness:
+   - Use file locking (flock / advisory locks) when updating ref files to
+     prevent race conditions where two pushes update the same branch simultaneously
+   - Or use atomic rename (write to temp file, rename to final path) which is
+     atomic on POSIX filesystems
+   - Eventually: replace filesystem storage with a database (SQLite, PostgreSQL)
+
+Q: How would you implement garbage collection?
+-----------------------------------------------
+A: Mark-and-sweep:
+   1. Mark phase: traverse all reachable objects starting from all branch tips
+      (BFS/DFS through commits -> trees -> blobs)
+   2. Sweep phase: delete any object file in .mygit/objects/ whose hash is
+      NOT in the reachable set
+   
+   Must also check stash, reflogs, and ORIG_HEAD before deleting anything.
+
+Q: What would be needed to support subdirectories?
+---------------------------------------------------
+A: Currently MyGit only indexes files in the repo root (flat file paths).
+   To support subdirectories:
+   1. Add recursive directory scanning in 'add'
+   2. Build nested tree objects (tree objects can reference other tree objects)
+   3. Modify tree storage/parsing to handle "040000 tree <hash>\t<dirname>"
+   4. Update checkout to reconstruct nested directory structure
+
+Q: How would you add support for .gitignore-style ignore files?
+---------------------------------------------------------------
+A: 1. When 'add .' is called, scan directory recursively
+   2. Read .mygitignore patterns (glob patterns, one per line)
+   3. Match each file path against patterns using fnmatch() or a glob library
+   4. Skip matching files during staging
+   5. Show them as "ignored" in status output
+
+================================================================================
+            SECTION 9: BEHAVIORAL / EXPERIENCE QUESTIONS
+================================================================================
+
+Q: Why did you build a Git from scratch?
+-----------------------------------------
+A: To truly understand version control internals. Reading documentation tells
+   you WHAT git does; implementing it yourself forces you to understand HOW
+   and WHY - why SHA1-based naming, why trees reference blobs, why three-way
+   merge needs a common ancestor, why the index exists as a separate concept
+   from both the working tree and commits.
+
+Q: What was the hardest part to implement?
+-------------------------------------------
+A: Three-way merge. It requires:
+   - Correctly finding the lowest common ancestor (merge base) via BFS on both
+     commit histories simultaneously
+   - Parsing tree objects to extract file snapshots for three different commits
+   - Implementing line-level diff logic to detect which changes are conflicting
+   - Generating proper conflict markers in the output files
+   - Correctly updating the index and writing a merge commit
+
+Q: What would you do differently if starting over?
+---------------------------------------------------
+A: 1. Extract a Repository class early to avoid duplicating findRepoRoot() etc.
+   2. Implement zlib compression from the start to be compatible with real Git
+   3. Use a cross-platform crypto library (OpenSSL) instead of Windows-only API
+   4. Add unit tests for each command from the beginning
+   5. Design the server with authentication from day one
+   6. Use mmap for large file handling instead of reading everything into memory
+
+Q: How does this differ from real Git?
+---------------------------------------
+A: Real Git additionally has:
+   - zlib object compression and pack files
+   - reflog (history of ref changes for recovery)
+   - stash (temporary shelving of changes)
+   - rebase (replay commits on a different base)
+   - submodules and worktrees
+   - SSH and HTTPS transport protocols (not raw HTTP)
+   - Object format version 2 (SHA-256 support)
+   - Hooks (pre-commit, post-receive, etc.)
+   - Partial clone and sparse checkout
+   - Cryptographic commit signing
+
+Q: Walk me through what happens when I run 'mygit commit -m "fix bug"'.
+------------------------------------------------------------------------
+A: 1. main.cpp parses argv, creates Commit object, calls commit.execute("fix bug")
+   2. findRepoRoot() walks up directories to find .mygit/
+   3. readIndex() opens .mygit/index, parses "mode hash filepath" lines into map
+   4. createTreeObject() builds tree content string (sorted map -> deterministic),
+      prepends "tree <size>\0", SHA1-hashes it, stores to .mygit/objects/
+   5. getParentCommit() reads HEAD, follows ref to get current tip hash (or "" for
+      initial commit)
+   6. createCommitObject() builds commit string with tree hash, parent hash,
+      timestamp (time()), message; SHA1-hashes it, stores to .mygit/objects/
+   7. updateHead() reads HEAD to find current branch ref path, writes new hash
+      to .mygit/refs/heads/<branch>
+   8. Prints "Committed with hash: <hash>"
+
+================================================================================
+            SECTION 10: QUICK-FIRE TECHNICAL QUESTIONS
+================================================================================
+
+Q: How many bytes is a SHA1 hash?    A: 20 bytes (160 bits), 40 hex chars
+Q: What C++ standard is used?        A: C++17
+Q: What does std::filesystem provide? A: Cross-platform file/directory operations
+Q: What does \0 mean in object header? A: Null byte literal separator (not "\\0")
+Q: What does cat-file -p do?          A: Pretty-prints an object's content
+Q: What does cat-file -t do?          A: Shows the type (blob/tree/commit)
+Q: What does cat-file -s do?          A: Shows the byte size of the object
+Q: How is config file format like?    A: INI-like: [section], key = value
+Q: What does 'ref: refs/heads/master' mean in HEAD? A: Symbolic reference to master branch
+Q: What is a detached HEAD?           A: HEAD contains raw commit hash, not branch ref
+Q: What is fast-forward merge?        A: No divergence; just advance branch pointer
+Q: What port does the server default to? A: 8080
+Q: How is PORT configured on the server? A: Environment variable PORT
+Q: What Go package is used for HTTP?  A: net/http (standard library)
+Q: Does the server use any external libraries? A: No, only Go standard library
+Q: What is goroutine vs thread?       A: Goroutine is lightweight (2KB), scheduled by Go runtime
+Q: What are Go's multiple return values used for? A: (result, error) pattern instead of exceptions
+Q: What does := do in Go?            A: Short variable declaration + assignment (infers type)
+Q: What is nil in Go?                A: Zero value for pointers, maps, slices, interfaces, funcs
+Q: What does range do in Go?         A: Iterates over maps, slices, channels, strings
+Q: What is io.ReadAll?               A: Reads all bytes from an io.Reader into []byte
+Q: What is os.WriteFile vs os.Create? A: WriteFile creates/overwrites atomically; Create is raw
+Q: What does strings.TrimPrefix do?  A: Removes specific prefix from string if present
+Q: What is filepath.Join used for?   A: Builds OS-appropriate paths from segments
+Q: How does handleObject determine GET vs POST? A: switch r.Method (http.MethodGet / http.MethodPost)
+Q: What data structure holds refs in listAllRefs? A: map[string]string (branch -> hash)
+Q: Why use make(map[string]string)?  A: make initializes nil map; direct map usage would panic
+Q: What is 100644 file mode?         A: Regular non-executable file (POSIX permissions)
+Q: What triggers "Already up to date"? A: Target commit == current commit OR merge base == target
+Q: What winsock function resolves DNS? A: getaddrinfo()
+Q: How is winsock initialized?       A: WSAStartup() with MAKEWORD(2,2); WSACleanup() on exit
+
+================================================================================
+                              END OF PREP GUIDE
+================================================================================
+Good luck with your interview! Remember: you BUILT this - you understand
+every byte of it. Be confident explaining your design decisions and trade-offs.
+================================================================================

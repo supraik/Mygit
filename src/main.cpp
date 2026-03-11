@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <vector>
 #include "commands/init.h"
 #include "commands/add.h"
 #include "commands/status.h"
@@ -10,6 +11,11 @@
 #include "commands/log.h"
 #include "commands/checkout.h"
 #include "commands/branch.h"
+#include "commands/merge.h"
+#include "commands/push.h"
+#include "commands/pull.h"
+#include "commands/remote.h"
+#include "commands/resolve.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -88,6 +94,44 @@ int main(int argc, char* argv[]) {
             // Create branch: mygit branch <branch-name>
             return branch.execute(argv[2]) ? 0 : 1;
         }
+    }
+    else if (command == "merge") {
+        if (argc < 3) {
+            std::cerr << "Usage: mygit merge <branch-name>\n";
+            return 1;
+        }
+        Merge merge;
+        return merge.execute(argv[2]) ? 0 : 1;
+    }
+    else if (command == "push") {
+        if (argc < 3) {
+            std::cerr << "Usage: mygit push <remote> [branch]\n";
+            return 1;
+        }
+        Push push;
+        std::string branch = (argc > 3) ? argv[3] : "";
+        return push.execute(argv[2], branch) ? 0 : 1;
+    }
+    else if (command == "pull") {
+        if (argc < 3) {
+            std::cerr << "Usage: mygit pull <remote> [branch]\n";
+            return 1;
+        }
+        Pull pull;
+        std::string branch = (argc > 3) ? argv[3] : "";
+        return pull.execute(argv[2], branch) ? 0 : 1;
+    }
+    else if (command == "remote") {
+        std::vector<std::string> args;
+        for (int i = 2; i < argc; i++) {
+            args.push_back(argv[i]);
+        }
+        Remote remote;
+        return remote.execute(args) ? 0 : 1;
+    }
+    else if (command == "resolve") {
+        Resolve resolve;
+        return resolve.execute() ? 0 : 1;
     }
     std::cerr << "Unknown command: " << command << "\n";
     return 1;

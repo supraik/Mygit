@@ -57,8 +57,50 @@ bool Status::execute() {
         }
     }
     
-    // Display status
-    std::cout << "On branch master\n\n";
+    // Display status - show actual current branch
+    std::string currentBranch = "master";
+    {
+        std::string headPath = repoPath + "/HEAD";
+        std::ifstream headFile(headPath);
+        if (headFile) {
+            std::string headLine;
+            std::getline(headFile, headLine);
+            while (!headLine.empty() && (headLine.back() == '\n' || headLine.back() == '\r'))
+                headLine.pop_back();
+            if (headLine.substr(0, 16) == "ref: refs/heads/")
+                currentBranch = headLine.substr(16);
+        }
+    }
+    std::cout << "On branch " << currentBranch << "\n\n";
+    
+    // Check if we're in a merge state
+    std::string mergeHeadPath = repoPath + "/MERGE_HEAD";
+    if (fs::exists(mergeHeadPath)) {
+        std::cout << "You have unmerged paths.\n";
+        std::cout << "  (fix conflicts and run \"mygit commit\")\n";
+        std::cout << "  (use \"mygit resolve\" to check conflict status)\n\n";
+        
+        // Show conflicted files
+        std::string conflictsPath = repoPath + "/MERGE_CONFLICTS";
+        if (fs::exists(conflictsPath)) {
+            std::ifstream conflictsFile(conflictsPath);
+            std::string conflictLine;
+            std::vector<std::string> conflictFiles;
+            while (std::getline(conflictsFile, conflictLine)) {
+                if (!conflictLine.empty()) {
+                    conflictFiles.push_back(conflictLine);
+                }
+            }
+            if (!conflictFiles.empty()) {
+                std::cout << "Unmerged paths:\n";
+                std::cout << "  (use \"mygit add <file>...\" to mark resolution)\n\n";
+                for (const auto& cf : conflictFiles) {
+                    std::cout << "\tboth modified:   " << cf << "\n";
+                }
+                std::cout << "\n";
+            }
+        }
+    }
     
     if (!stagedFiles.empty()) {
         std::cout << "Changes to be committed:\n";

@@ -53,7 +53,14 @@ bool Rm::updateIndex(const std::string& repoPath, const std::string& filePath) {
     bool found = false;
     
     while (std::getline(indexStream, line)) {
-        if (line.find(filePath) != std::string::npos) {
+        // Parse to extract the filename from "mode hash filename"
+        std::istringstream lineStream(line);
+        std::string mode, hash, name;
+        if (lineStream >> mode >> hash) {
+            std::getline(lineStream, name);
+            if (!name.empty() && name[0] == ' ') name = name.substr(1);
+        }
+        if (name == filePath) {
             found = true; // Skip this line to remove it
         } else {
             updatedIndex += line + "\n";

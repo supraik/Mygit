@@ -10,16 +10,17 @@
 
 class Commit {
 private:
-bool findRepoRoot(std::string& repoPath);  // Same pattern as Add
-std::map<std::string, std::string> readIndex(const std::string& repoPath);  // Returns hash->path map
-std::string createTreeObject(const std::string& repoPath, const std::map<std::string, std::string>& index);  // Returns tree hash
-std::string createCommitObject(const std::string& repoPath, const std::string& treeHash, const std::string& parent, const std::string& message);  // Returns commit hash
-std::string getParentCommit(const std::string& repoPath);  // Returns parent commit hash (or empty)
-bool storeObject(const std::string& repoPath, const std::string& hash, const std::string& content);  // Stores object
-bool updateHead(const std::string& repoPath, const std::string& commitHash);  // Updates HEAD reference
+bool findRepoRoot(std::string& repoPath);
+std::map<std::string, std::string> readIndex(const std::string& repoPath);
+std::string createTreeObject(const std::string& repoPath, const std::map<std::string, std::string>& index);
+std::string createCommitObject(const std::string& repoPath, const std::string& treeHash, const std::string& parent, const std::string& message);
+std::string createMergeCommitObject(const std::string& repoPath, const std::string& treeHash, const std::string& parent1, const std::string& parent2, const std::string& message);
+std::string getParentCommit(const std::string& repoPath);
+bool storeObject(const std::string& repoPath, const std::string& hash, const std::string& content);
+bool updateHead(const std::string& repoPath, const std::string& commitHash);
 
 public:
-bool execute(const std::string& message);  // Takes commit message, returns success
+bool execute(const std::string& message);
 };
 
 #endif

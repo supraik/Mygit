@@ -8,7 +8,6 @@
 namespace fs = std::filesystem;
 
 bool Log::execute() {
-   /// std::cout<<"debugging log command execute 1...\n";
     std::string repoPath;
     if (!findRepoRoot(repoPath)) {
         std::cerr << "fatal: not a mygit repository\n";
@@ -65,7 +64,6 @@ bool Log::findRepoRoot(std::string& repoPath) {
 
 std::string Log::getCurrentCommit(const std::string& repoPath) {
     std::string headPath = repoPath + "/HEAD";
-    std::cout<<"checking HEAD at: " << headPath << "\n";
     // Read HEAD file
     std::ifstream headFile(headPath);
     if (!headFile) {
@@ -89,7 +87,6 @@ std::string Log::getCurrentCommit(const std::string& repoPath) {
         // Read the reference file
         std::string refFilePath = repoPath + "/" + refPath;
         
-        std::cout<< "Current HEAD points to: " << refFilePath << "\n";
         if (!fs::exists(refFilePath)) {
             // No commits yet
             return "";
@@ -190,7 +187,10 @@ bool Log::readCommitObject(const std::string& repoPath, const std::string& commi
         } else if (line.substr(0, 5) == "tree ") {
             info.tree = line.substr(5);
         } else if (line.substr(0, 7) == "parent ") {
-            info.parent = line.substr(7);
+            // Only use the first parent for log traversal (skip merge parents)
+            if (info.parent.empty()) {
+                info.parent = line.substr(7);
+            }
         } else if (line.substr(0, 7) == "author ") {
             info.author = line.substr(7);
             // Extract timestamp from author line

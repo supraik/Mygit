@@ -34,15 +34,57 @@ bool Commit::execute(const std::string& message) {
     // Get parent commit
     std::string parent = getParentCommit(repoPath);
     
-    // Create commit object
-    std::string commitHash = createCommitObject(repoPath, treeHash, parent, message);
+    // Check if we're completing a merge (MERGE_HEAD exists)
+    std::string mergeHeadPath = repoPath + "/MERGE_HEAD";
+    std::string mergeParent;
+    bool isMergeCommit = false;
+    
+    if (fs::exists(mergeHeadPath)) {
+        std::ifstream mergeHeadFile(mergeHeadPath);
+        if (mergeHeadFile) {
+            std::getline(mergeHeadFile, mergeParent);
+            while (!mergeParent.empty() && (mergeParent.back() == '\n' || mergeParent.back() == '\r')) {
+                mergeParent.pop_back();
+            }
+            if (!mergeParent.empty()) {
+                isMergeCommit = true;
+            }
+        }
+    }
+    
+    // Use MERGE_MSG as default message if no message provided and we're merging
+    std::string commitMessage = message;
+    if (isMergeCommit && message.empty()) {
+        std::string mergeMsgPath = repoPath + "/MERGE_MSG";
+        if (fs::exists(mergeMsgPath)) {
+            std::ifstream mergeMsgFile(mergeMsgPath);
+            std::string line;
+            commitMessage = "";
+            while (std::getline(mergeMsgFile, line)) {
+                if (line.empty() || line[0] != '#') {
+                    commitMessage += line + "\n";
+                }
+            }
+            // Trim trailing newlines
+            while (!commitMessage.empty() && commitMessage.back() == '\n') {
+                commitMessage.pop_back();
+            }
+        }
+    }
+    
+    std::string commitHash;
+    if (isMergeCommit) {
+        // Create merge commit with two parents
+        commitHash = createMergeCommitObject(repoPath, treeHash, parent, mergeParent, commitMessage);
+    } else {
+        // Create normal commit
+        commitHash = createCommitObject(repoPath, treeHash, parent, commitMessage);
+    }
+    
     if (commitHash.empty()) {
         std::cerr << "error: failed to create commit object\n";
         return false;
     }
-    
-    // Note: Commit object is already stored in createCommitObject
-    // Tree object is already stored in createTreeObject
     
     // Update HEAD reference
     if (!updateHead(repoPath, commitHash)) {
@@ -50,7 +92,16 @@ bool Commit::execute(const std::string& message) {
         return false;
     }
     
-    std::cout << "Committed with hash: " << commitHash << "\n";
+    // Clean up merge state if this was a merge commit
+    if (isMergeCommit) {
+        fs::remove(repoPath + "/MERGE_HEAD");
+        fs::remove(repoPath + "/MERGE_MSG");
+        fs::remove(repoPath + "/MERGE_CONFLICTS");
+        std::cout << "Merge commit created: " << commitHash << "\n";
+    } else {
+        std::cout << "Committed with hash: " << commitHash << "\n";
+    }
+    
     return true;
 }
 
@@ -232,6 +283,34 @@ std::string Commit::createCommitObject(const std::string& repoPath, const std::s
     std::string commitHash = Hash::sha1(commitData);
     
     // Store the commit object
+    if (!storeObject(repoPath, commitHash, commitData)) {
+        return "";
+    }
+    
+    return commitHash;
+}
+
+// Create a merge commit object with two parents
+std::string Commit::createMergeCommitObject(const std::string& repoPath, const std::string& treeHash,
+                                             const std::string& parent1, const std::string& parent2,
+                                             const std::string& message) {
+    std::time_t now = std::time(nullptr);
+    
+    std::ostringstream commitContent;
+    commitContent << "tree " << treeHash << "\n";
+    commitContent << "parent " << parent1 << "\n";
+    commitContent << "parent " << parent2 << "\n";
+    commitContent << "author User <user@example.com> " << now << " +0000\n";
+    commitContent << "committer User <user@example.com> " << now << " +0000\n";
+    commitContent << "\n";
+    commitContent << message << "\n";
+    
+    std::string content = commitContent.str();
+    std::string header = "commit " + std::to_string(content.size()) + '\0';
+    std::string commitData = header + content;
+    
+    std::string commitHash = Hash::sha1(commitData);
+    
     if (!storeObject(repoPath, commitHash, commitData)) {
         return "";
     }

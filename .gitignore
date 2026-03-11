@@ -1,11 +1,29 @@
+# Build outputs
+build/
 *.exe
 *.o
 *.obj
 *.out
 *.dll
-build/
+
+# MyGit data
 .mygit/
-*.txt
-!README.md
-IMPLEMENTATION.md
-DOCKER_GUIDE.md
+
+# Test directories
+test_server/
+test_client/
+test_all/
+test_merge/
+
+# Logs
+*.log
+
+# Scratch/temp text files
+file2.txt
+file3.txt
+newfile.txt
+run.txt
+sample.txt
+secondfile.txt
+test.txt
+testcommit.txt
