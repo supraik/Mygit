@@ -37,29 +37,90 @@ bool Push::execute(const std::string& remoteName, const std::string& branchName)
     }
     
     std::cout << "Pushing " << pushBranch << " to " << remoteName << "...\n";
-    
-    // Get all objects that need to be pushed
+
+    // ── Parse URL once ────────────────────────────────────────────────────────
+    std::string host, basePath;
+    bool isHttps = false;
+    INTERNET_PORT port = 80;
+
+    size_t protoPos = remoteUrl.find("://");
+    if (protoPos != std::string::npos) {
+        std::string scheme = remoteUrl.substr(0, protoPos);
+        isHttps = (scheme == "https");
+        port = isHttps ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+    }
+    std::string urlWithoutProto = (protoPos != std::string::npos) ? remoteUrl.substr(protoPos + 3) : remoteUrl;
+
+    size_t pathPos = urlWithoutProto.find('/');
+    if (pathPos != std::string::npos) {
+        host     = urlWithoutProto.substr(0, pathPos);
+        basePath = urlWithoutProto.substr(pathPos);
+    } else {
+        host     = urlWithoutProto;
+        basePath = "";
+    }
+
+    size_t portPos = host.find(':');
+    if (portPos != std::string::npos) {
+        port = (INTERNET_PORT)std::stoi(host.substr(portPos + 1));
+        host = host.substr(0, portPos);
+    }
+
+    std::wstring wHost(host.begin(), host.end());
+    std::wstring wBasePath(basePath.begin(), basePath.end());
+
+    // ── Create session and connection ONCE ────────────────────────────────────
+    HINTERNET hSession = WinHttpOpen(L"mygit/1.0",
+        WINHTTP_ACCESS_TYPE_NO_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) {
+        std::cout << "WinHttpOpen failed: " << GetLastError() << "\n";
+        return false;
+    }
+
+    // Timeouts: resolve=8s, connect=15s, send=30s, receive=30s
+    WinHttpSetTimeouts(hSession, 8000, 15000, 30000, 30000);
+
+    DWORD dwProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &dwProtocols, sizeof(dwProtocols));
+
+    HINTERNET hConnect = WinHttpConnect(hSession, wHost.c_str(), port, 0);
+    if (!hConnect) {
+        std::cout << "WinHttpConnect failed: " << GetLastError() << "\n";
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    // ── Push all objects ──────────────────────────────────────────────────────
     std::vector<std::string> objects = getAllReferencedObjects(branchHash);
     std::cout << "Found " << objects.size() << " objects to push\n";
-    
-    // Push all objects
+
     int pushed = 0;
+    bool anyFailed = false;
     for (const auto& hash : objects) {
-        if (sendObject(remoteUrl, hash)) {
+        if (sendObject(hConnect, wBasePath, hash, isHttps)) {
             pushed++;
             std::cout << "\rPushing objects: " << pushed << "/" << objects.size() << std::flush;
+        } else {
+            std::cout << "\nFailed to push object: " << hash << "\n";
+            anyFailed = true;
         }
     }
     std::cout << "\n";
-    
-    // Update remote ref
-    if (updateRemoteRef(remoteUrl, pushBranch, branchHash)) {
-        std::cout << "Successfully pushed " << pushBranch << " -> " << remoteName << "/" << pushBranch << "\n";
-        return true;
+
+    bool ok = false;
+    if (!anyFailed) {
+        if (updateRemoteRef(hConnect, wBasePath, pushBranch, branchHash, isHttps)) {
+            std::cout << "Successfully pushed " << pushBranch << " -> " << remoteName << "/" << pushBranch << "\n";
+            ok = true;
+        } else {
+            std::cerr << "Failed to update remote ref\n";
+        }
     }
-    
-    std::cerr << "Failed to update remote ref\n";
-    return false;
+
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return ok;
 }
 
 std::string Push::getRemoteUrl(const std::string& remoteName) {
@@ -230,22 +291,25 @@ std::vector<std::string> Push::getAllReferencedObjects(const std::string& commit
     return result;
 }
 
-bool Push::sendObject(const std::string& url, const std::string& hash) {
+bool Push::sendObject(HINTERNET hConnect, const std::wstring& basePath, const std::string& hash, bool isHttps) {
     std::string content = readObject(hash);
     if (content.empty()) {
+        std::cout << "readObject empty for hash: [" << hash << "] len=" << hash.size() << "\n";
         return false;
     }
-    
-    std::string endpoint = url + "/object/" + hash;
-    std::string response = httpPost(endpoint, content);
-    
+
+    std::wstring hashW(hash.begin(), hash.end());
+    std::wstring wPath = basePath + L"/object/" + hashW;
+    std::string response = httpPost(hConnect, wPath, content, isHttps);
+
     return !response.empty();
 }
 
-bool Push::updateRemoteRef(const std::string& url, const std::string& refName, const std::string& hash) {
-    std::string endpoint = url + "/ref/" + refName;
-    std::string response = httpPost(endpoint, hash);
-    
+bool Push::updateRemoteRef(HINTERNET hConnect, const std::wstring& basePath, const std::string& refName, const std::string& hash, bool isHttps) {
+    std::wstring refW(refName.begin(), refName.end());
+    std::wstring wPath = basePath + L"/ref/" + refW;
+    std::string response = httpPost(hConnect, wPath, hash, isHttps);
+
     return !response.empty();
 }
 
@@ -266,54 +330,14 @@ std::string Push::readObject(const std::string& hash) {
     return oss.str();
 }
 
-std::string Push::httpPost(const std::string& url, const std::string& data) {
-    // Parse URL
-    std::string host, path;
-    bool isHttps = false;
-    INTERNET_PORT port = 80;
-
-    size_t protoPos = url.find("://");
-    if (protoPos != std::string::npos) {
-        std::string scheme = url.substr(0, protoPos);
-        isHttps = (scheme == "https");
-        port = isHttps ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
-    }
-    std::string urlWithoutProto = (protoPos != std::string::npos) ? url.substr(protoPos + 3) : url;
-
-    size_t pathPos = urlWithoutProto.find('/');
-    if (pathPos != std::string::npos) {
-        host = urlWithoutProto.substr(0, pathPos);
-        path = urlWithoutProto.substr(pathPos);
-    } else {
-        host = urlWithoutProto;
-        path = "/";
-    }
-
-    size_t portPos = host.find(':');
-    if (portPos != std::string::npos) {
-        port = (INTERNET_PORT)std::stoi(host.substr(portPos + 1));
-        host = host.substr(0, portPos);
-    }
-
-    std::wstring wHost(host.begin(), host.end());
-    std::wstring wPath(path.begin(), path.end());
-
-    HINTERNET hSession = WinHttpOpen(L"mygit/1.0",
-        WINHTTP_ACCESS_TYPE_NO_PROXY,
-        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return "";
-
-    // Explicitly enable TLS 1.2 for compatibility with modern servers
-    DWORD dwProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
-    WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &dwProtocols, sizeof(dwProtocols));
-
-    HINTERNET hConnect = WinHttpConnect(hSession, wHost.c_str(), port, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return ""; }
-
+std::string Push::httpPost(HINTERNET hConnect, const std::wstring& path, const std::string& data, bool isHttps) {
     DWORD flags = isHttps ? WINHTTP_FLAG_SECURE : 0;
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", wPath.c_str(),
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", path.c_str(),
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+    if (!hRequest) {
+        std::cout << "WinHttpOpenRequest failed: " << GetLastError() << "\n";
+        return "";
+    }
 
     if (isHttps) {
         DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
@@ -327,9 +351,34 @@ std::string Push::httpPost(const std::string& url, const std::string& data) {
     BOOL bResult = WinHttpSendRequest(hRequest,
         contentTypeHeader.c_str(), (DWORD)-1L,
         (LPVOID)data.data(), (DWORD)data.size(), (DWORD)data.size(), 0);
-    if (!bResult) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+    if (!bResult) {
+        std::cout << "WinHttpSendRequest failed: " << GetLastError() << "\n";
+        WinHttpCloseHandle(hRequest);
+        return "";
+    }
 
-    if (!WinHttpReceiveResponse(hRequest, NULL)) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+    if (!WinHttpReceiveResponse(hRequest, NULL)) {
+        std::cout << "WinHttpReceiveResponse failed: " << GetLastError() << "\n";
+        WinHttpCloseHandle(hRequest);
+        return "";
+    }
+
+    // Check HTTP status
+    DWORD statusCode = 0;
+    DWORD statusSize = sizeof(statusCode);
+    WinHttpQueryHeaders(hRequest,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+    // 409 = object already exists on server — treat as success
+    if (statusCode >= 400 && statusCode != 409) {
+        std::cout << "Server returned HTTP " << statusCode << "\n";
+        WinHttpCloseHandle(hRequest);
+        return "";
+    }
+    if (statusCode == 409) {
+        WinHttpCloseHandle(hRequest);
+        return "ok";
+    }
 
     std::string response;
     DWORD bytesAvailable = 0;
@@ -342,8 +391,5 @@ std::string Push::httpPost(const std::string& url, const std::string& data) {
     }
 
     WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-
-    return response;
+    return response.empty() ? "ok" : response;
 }
