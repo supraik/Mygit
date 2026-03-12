@@ -6,9 +6,10 @@
 #include <filesystem>
 #include <set>
 #include <queue>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
+#include <vector>
+#include <windows.h>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")
 
 namespace fs = std::filesystem;
 
@@ -254,11 +255,17 @@ bool Pull::updateLocalRef(const std::string& branchName, const std::string& hash
 std::string Pull::httpGet(const std::string& url) {
     // Parse URL
     std::string host, path;
-    int port = 8080;
-    
+    bool isHttps = false;
+    INTERNET_PORT port = 80;
+
     size_t protoPos = url.find("://");
+    if (protoPos != std::string::npos) {
+        std::string scheme = url.substr(0, protoPos);
+        isHttps = (scheme == "https");
+        port = isHttps ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+    }
     std::string urlWithoutProto = (protoPos != std::string::npos) ? url.substr(protoPos + 3) : url;
-    
+
     size_t pathPos = urlWithoutProto.find('/');
     if (pathPos != std::string::npos) {
         host = urlWithoutProto.substr(0, pathPos);
@@ -267,71 +274,51 @@ std::string Pull::httpGet(const std::string& url) {
         host = urlWithoutProto;
         path = "/";
     }
-    
+
     size_t portPos = host.find(':');
     if (portPos != std::string::npos) {
-        port = std::stoi(host.substr(portPos + 1));
+        port = (INTERNET_PORT)std::stoi(host.substr(portPos + 1));
         host = host.substr(0, portPos);
     }
-    
-    // Initialize Winsock
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        return "";
-    }
-    
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        WSACleanup();
-        return "";
-    }
-    
-    struct addrinfo hints = {}, *result = nullptr;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &result) != 0 || !result) {
-        closesocket(sock);
-        WSACleanup();
-        return "";
-    }
-    
-    if (connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
-        freeaddrinfo(result);
-        closesocket(sock);
-        WSACleanup();
-        return "";
-    }
-    freeaddrinfo(result);
-    
-    // Send HTTP GET request
-    std::ostringstream request;
-    request << "GET " << path << " HTTP/1.1\r\n";
-    request << "Host: " << host << "\r\n";
-    request << "Connection: close\r\n";
-    request << "\r\n";
-    
-    std::string requestStr = request.str();
-    send(sock, requestStr.c_str(), requestStr.length(), 0);
-    
-    // Receive response (binary-safe)
-    char buffer[4096];
+
+    std::wstring wHost(host.begin(), host.end());
+    std::wstring wPath(path.begin(), path.end());
+
+    HINTERNET hSession = WinHttpOpen(L"mygit/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return "";
+
+    HINTERNET hConnect = WinHttpConnect(hSession, wHost.c_str(), port, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return ""; }
+
+    DWORD flags = isHttps ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wPath.c_str(),
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+
+    BOOL bResult = WinHttpSendRequest(hRequest,
+        WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (!bResult) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+
+    WinHttpReceiveResponse(hRequest, NULL);
+
     std::string response;
-    int bytesReceived;
-    while ((bytesReceived = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
-        response.append(buffer, bytesReceived);
+    DWORD bytesAvailable = 0;
+    while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
+        std::vector<char> buffer(bytesAvailable);
+        DWORD bytesRead = 0;
+        if (WinHttpReadData(hRequest, buffer.data(), bytesAvailable, &bytesRead)) {
+            response.append(buffer.data(), bytesRead);
+        }
     }
-    
-    closesocket(sock);
-    WSACleanup();
-    
-    // Extract body from HTTP response
-    size_t bodyPos = response.find("\r\n\r\n");
-    if (bodyPos != std::string::npos) {
-        return response.substr(bodyPos + 4);
-    }
-    
-    return "";
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    return response;
 }
 
 bool Pull::httpGetToFile(const std::string& url, const std::string& filePath) {

@@ -6,9 +6,10 @@
 #include <filesystem>
 #include <set>
 #include <queue>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
+#include <vector>
+#include <windows.h>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")
 
 namespace fs = std::filesystem;
 
@@ -134,16 +135,30 @@ std::string Push::getCurrentBranch() {
 std::string Push::getBranchHash(const std::string& branchName) {
     std::string refPath = ".mygit/refs/heads/" + branchName;
     std::ifstream refFile(refPath);
-    if (!refFile) {
-        return "";
+    if (refFile) {
+        std::string hash;
+        std::getline(refFile, hash);
+        while (!hash.empty() && (hash.back() == '\n' || hash.back() == '\r')) {
+            hash.pop_back();
+        }
+        if (!hash.empty()) return hash;
     }
-    
-    std::string hash;
-    std::getline(refFile, hash);
-    while (!hash.empty() && (hash.back() == '\n' || hash.back() == '\r')) {
-        hash.pop_back();
+
+    // Fall back: if HEAD is detached and we're pushing the current branch, use HEAD
+    std::ifstream headFile(".mygit/HEAD");
+    if (!headFile) return "";
+    std::string head;
+    std::getline(headFile, head);
+    while (!head.empty() && (head.back() == '\n' || head.back() == '\r')) {
+        head.pop_back();
     }
-    return hash;
+    // HEAD is detached (raw hash) — use it and also repair the branch ref
+    if (head.substr(0, 5) != "ref: ") {
+        std::ofstream repair(refPath);
+        if (repair) repair << head << "\n";
+        return head;
+    }
+    return "";
 }
 
 std::vector<std::string> Push::getAllReferencedObjects(const std::string& commitHash) {
@@ -254,11 +269,17 @@ std::string Push::readObject(const std::string& hash) {
 std::string Push::httpPost(const std::string& url, const std::string& data) {
     // Parse URL
     std::string host, path;
-    int port = 8080;
-    
+    bool isHttps = false;
+    INTERNET_PORT port = 80;
+
     size_t protoPos = url.find("://");
+    if (protoPos != std::string::npos) {
+        std::string scheme = url.substr(0, protoPos);
+        isHttps = (scheme == "https");
+        port = isHttps ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+    }
     std::string urlWithoutProto = (protoPos != std::string::npos) ? url.substr(protoPos + 3) : url;
-    
+
     size_t pathPos = urlWithoutProto.find('/');
     if (pathPos != std::string::npos) {
         host = urlWithoutProto.substr(0, pathPos);
@@ -267,76 +288,49 @@ std::string Push::httpPost(const std::string& url, const std::string& data) {
         host = urlWithoutProto;
         path = "/";
     }
-    
+
     size_t portPos = host.find(':');
     if (portPos != std::string::npos) {
-        port = std::stoi(host.substr(portPos + 1));
+        port = (INTERNET_PORT)std::stoi(host.substr(portPos + 1));
         host = host.substr(0, portPos);
     }
-    
-    // Initialize Winsock
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        return "";
-    }
-    
-    // Create socket
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) {
-        WSACleanup();
-        return "";
-    }
-    
-    // Resolve hostname
-    struct addrinfo hints = {}, *result = nullptr;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &result) != 0 || !result) {
-        closesocket(sock);
-        WSACleanup();
-        return "";
-    }
-    
-    // Connect
-    if (connect(sock, result->ai_addr, (int)result->ai_addrlen) == SOCKET_ERROR) {
-        freeaddrinfo(result);
-        closesocket(sock);
-        WSACleanup();
-        return "";
-    }
-    freeaddrinfo(result);
-    
-    // Send HTTP POST request
-    std::ostringstream request;
-    request << "POST " << path << " HTTP/1.1\r\n";
-    request << "Host: " << host << "\r\n";
-    request << "Content-Length: " << data.length() << "\r\n";
-    request << "Connection: close\r\n";
-    request << "\r\n";
-    request << data;
-    
-    std::string requestStr = request.str();
-    // Send all data, handling partial sends
-    const char* sendBuf = requestStr.c_str();
-    int remaining = (int)requestStr.length();
-    while (remaining > 0) {
-        int sent = send(sock, sendBuf, remaining, 0);
-        if (sent <= 0) break;
-        sendBuf += sent;
-        remaining -= sent;
-    }
-    
-    // Receive response (binary-safe)
-    char buffer[4096];
+
+    std::wstring wHost(host.begin(), host.end());
+    std::wstring wPath(path.begin(), path.end());
+
+    HINTERNET hSession = WinHttpOpen(L"mygit/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return "";
+
+    HINTERNET hConnect = WinHttpConnect(hSession, wHost.c_str(), port, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return ""; }
+
+    DWORD flags = isHttps ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", wPath.c_str(),
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+
+    BOOL bResult = WinHttpSendRequest(hRequest,
+        WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        (LPVOID)data.c_str(), (DWORD)data.size(), (DWORD)data.size(), 0);
+    if (!bResult) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+
+    WinHttpReceiveResponse(hRequest, NULL);
+
     std::string response;
-    int bytesReceived;
-    while ((bytesReceived = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
-        response.append(buffer, bytesReceived);
+    DWORD bytesAvailable = 0;
+    while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
+        std::vector<char> buffer(bytesAvailable);
+        DWORD bytesRead = 0;
+        if (WinHttpReadData(hRequest, buffer.data(), bytesAvailable, &bytesRead)) {
+            response.append(buffer.data(), bytesRead);
+        }
     }
-    
-    closesocket(sock);
-    WSACleanup();
-    
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
     return response;
 }

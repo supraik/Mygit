@@ -28,5 +28,5 @@ add_executable(mygit
 target_include_directories(mygit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Link Windows libraries
-target_link_libraries(mygit PRIVATE crypt32 ws2_32)
+target_link_libraries(mygit PRIVATE crypt32 winhttp)
 
