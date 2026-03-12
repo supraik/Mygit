@@ -27,3 +27,11 @@ sample.txt
 secondfile.txt
 test.txt
 testcommit.txt
+
+# Personal / project files not for repo
+DEVLOG.md
+dhruv_khanna.txt
+sequence_diagram.tex
+
+# Test pull directory
+test_pull/

@@ -299,9 +299,13 @@ std::string Push::httpPost(const std::string& url, const std::string& data) {
     std::wstring wPath(path.begin(), path.end());
 
     HINTERNET hSession = WinHttpOpen(L"mygit/1.0",
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_ACCESS_TYPE_NO_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return "";
+
+    // Explicitly enable TLS 1.2 for compatibility with modern servers
+    DWORD dwProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &dwProtocols, sizeof(dwProtocols));
 
     HINTERNET hConnect = WinHttpConnect(hSession, wHost.c_str(), port, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return ""; }
@@ -311,12 +315,21 @@ std::string Push::httpPost(const std::string& url, const std::string& data) {
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
 
+    if (isHttps) {
+        DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                         SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE |
+                         SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                         SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
+    }
+
+    std::wstring contentTypeHeader = L"Content-Type: application/octet-stream\r\n";
     BOOL bResult = WinHttpSendRequest(hRequest,
-        WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-        (LPVOID)data.c_str(), (DWORD)data.size(), (DWORD)data.size(), 0);
+        contentTypeHeader.c_str(), (DWORD)-1L,
+        (LPVOID)data.data(), (DWORD)data.size(), (DWORD)data.size(), 0);
     if (!bResult) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
 
-    WinHttpReceiveResponse(hRequest, NULL);
+    if (!WinHttpReceiveResponse(hRequest, NULL)) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
 
     std::string response;
     DWORD bytesAvailable = 0;
